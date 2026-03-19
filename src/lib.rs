@@ -1,8 +1,11 @@
+mod fish;
+
 use flowmango::prelude::*;
-use quartz::{load_image, load_image_sized, GameObject};
+use quartz::{load_image, GameObject, Image, ShapeType};
 use image::{RgbaImage, Rgba};
-use prism::canvas::{Image, ShapeType};
 use ramp::prism;
+
+use fish::{GameAssets, FishManager};
 
 pub struct IslandCafe;
 
@@ -16,14 +19,18 @@ impl IslandCafe {
         let player_w   = 200.0;
         let player_h   = 200.0;
         let player_y   = 700.0;
-        let move_speed = 10.0;
+        let move_speed = 6.0;
         let max_line   = 550.0;
-        let line_speed = 14.0;
+        let line_speed = 8.0;
         let hook_w     = 32.0;
         let hook_h     = 38.0;
+        let fish_w     = 90.0;
+        let fish_h     = fish_w * 0.55;
 
         let rod_tip_right = (0.85, 0.20);
         let rod_tip_left  = (0.15, 0.20);
+
+        let assets = GameAssets::load(player_w, player_h, hook_w, hook_h, fish_w, fish_h);
 
         let mut scene = Scene::new(ctx, CanvasMode::Landscape, 3);
 
@@ -42,7 +49,7 @@ impl IslandCafe {
 
         scene.add_object(
             GameObject::build("player")
-                .image(load_image_sized("assets/playerright.png", player_w, player_h))
+                .image(assets.player_right.clone())
                 .size(player_w, player_h)
                 .position((3840.0 - player_w) / 2.0, player_y)
                 .tag("player")
@@ -52,102 +59,129 @@ impl IslandCafe {
 
         scene.set_camera_follow("player".into(), 0.10);
 
-        if let Some(layer) = scene.get_layer_mut(LayerId(2)) {
-            layer.canvas_mut().play_sound_with(
-                "assets/backgroundmusic.mp3",
-                SoundOptions::new().looping(true).volume(0.1).fade_in(1.0),
-            );
+        scene.get_layer_mut(LayerId(2)).unwrap().canvas_mut().play_sound_with(
+            "assets/backgroundmusic.mp3",
+            SoundOptions::new().looping(true).volume(0.1).fade_in(1.0),
+        );
 
-            let mut rowing:     Option<SoundHandle> = None;
-            let mut line_len:   f32  = 0.0;
-            let mut facing_left = false;
+        let mut rowing:      Option<SoundHandle> = None;
+        let mut line_len:    f32  = 0.0;
+        let mut last_line:   f32  = -1.0;
+        let mut facing_left       = false;
+        let mut fish_manager      = FishManager::new();
 
-            layer.canvas_mut().on_update(move |canvas| {
-                let left   = canvas.key("left");
-                let right  = canvas.key("right");
-                let cast   = canvas.key("up");
+        scene.get_layer_mut(LayerId(2)).unwrap().canvas_mut().on_update(move |canvas| {
+            let left  = canvas.key("left");
+            let right = canvas.key("right");
+            let cast  = canvas.key("up");
+
+            let catch_playing = fish_manager.catch_anim.is_some();
+
+            if !catch_playing {
                 let moving = left || right;
-
-                if moving && rowing.as_ref().map_or(true, |h| h.is_finished()) {
-                    rowing = Some(canvas.play_sound_with(
-                        "assets/rowing.wav",
-                        SoundOptions::new().looping(true).volume(0.85).fade_in(0.15),
-                    ));
-                }
-                if !moving {
+                if moving {
+                    let sound_done = rowing.as_ref().map_or(true, |h| h.is_finished());
+                    if sound_done {
+                        rowing = Some(canvas.play_sound_with(
+                            "assets/rowing.wav",
+                            SoundOptions::new().looping(true).volume(0.85).fade_in(0.15),
+                        ));
+                    }
+                } else {
                     if let Some(h) = rowing.take() { h.fade_out(0.25); }
                 }
 
-                if let Some(go) = canvas.get_game_object_mut("2_player") {
+                if let Some(player) = canvas.get_game_object_mut("2_player") {
                     if right {
-                        facing_left = false;
-                        go.position.0 = (go.position.0 + move_speed).min(3840.0 - player_w);
-                        go.set_image(load_image_sized("assets/playerright.png", player_w, player_h));
+                        if facing_left {
+                            facing_left = false;
+                            player.set_image(assets.player_right.clone());
+                        }
+                        player.position.0 = (player.position.0 + move_speed).min(3840.0 - player_w);
                     } else if left {
-                        facing_left = true;
-                        go.position.0 = (go.position.0 - move_speed).max(0.0);
-                        go.set_image(load_image_sized("assets/playerleft.png", player_w, player_h));
+                        if !facing_left {
+                            facing_left = true;
+                            player.set_image(assets.player_left.clone());
+                        }
+                        player.position.0 = (player.position.0 - move_speed).max(0.0);
                     }
                 }
+            } else {
+                if let Some(h) = rowing.take() { h.fade_out(0.25); }
+            }
 
-                line_len = if cast {
-                    (line_len + line_speed).min(max_line)
+            if cast {
+                line_len = (line_len + line_speed).min(max_line);
+            } else {
+                line_len = (line_len - line_speed * 2.0).max(0.0);
+            }
+
+            let player_pos = canvas.get_game_object("2_player")
+                .map(|g| g.position)
+                .unwrap_or((0.0, 0.0));
+            let tip    = if facing_left { rod_tip_left } else { rod_tip_right };
+            let rod_x  = player_pos.0 + player_w * tip.0 - 2.0;
+            let rod_y  = player_pos.1 + player_h * tip.1;
+            let hx     = rod_x - hook_w / 2.0;
+            let hy     = rod_y + line_len - 6.0;
+
+            let player_center_x = player_pos.0 + player_w / 2.0;
+            let player_center_y = player_pos.1 + player_h / 2.0;
+
+            if line_len > 0.0 {
+                let hook_img = if facing_left {
+                    assets.hook_left.clone()
                 } else {
-                    (line_len - line_speed * 2.0).max(0.0)
+                    assets.hook_right.clone()
                 };
 
-                if line_len > 0.0 {
-                    let (px, py) = canvas.get_game_object("2_player")
-                        .map(|g| g.position)
-                        .unwrap_or((0.0, 0.0));
-
-                    let tip = if facing_left { rod_tip_left } else { rod_tip_right };
-                    let lx  = px + player_w * tip.0 - 2.0;
-                    let ly  = py + player_h * tip.1;
-
-                    if let Some(line) = canvas.get_game_object_mut("fishing_line") {
-                        line.position = (lx, ly);
+                if let Some(line) = canvas.get_game_object_mut("fishing_line") {
+                    line.position = (rod_x, rod_y);
+                    line.size     = (4.0, line_len);
+                    if (line_len - last_line).abs() > 1.0 {
                         line.set_image(line_image(line_len));
-                        line.size = (4.0, line_len);
-                    } else {
-                        canvas.add_game_object(
-                            "fishing_line".to_string(),
-                            GameObject::build("fishing_line")
-                                .image(line_image(line_len))
-                                .size(4.0, line_len)
-                                .position(lx, ly)
-                                .finish(),
-                        );
-                    }
-
-                    let hx = lx - hook_w / 2.0;
-                    let hy = ly + line_len - 6.0;
-
-                    let hook_img = if facing_left {
-                        load_image_sized("assets/hookleft.png", hook_w, hook_h)
-                    } else {
-                        load_image_sized("assets/hookright.png", hook_w, hook_h)
-                    };
-
-                    if let Some(hook) = canvas.get_game_object_mut("fishing_hook") {
-                        hook.position = (hx, hy);
-                        hook.set_image(hook_img);
-                    } else {
-                        canvas.add_game_object(
-                            "fishing_hook".to_string(),
-                            GameObject::build("fishing_hook")
-                                .image(hook_img)
-                                .size(hook_w, hook_h)
-                                .position(hx, hy)
-                                .finish(),
-                        );
+                        last_line = line_len;
                     }
                 } else {
-                    canvas.remove_game_object("fishing_line");
-                    canvas.remove_game_object("fishing_hook");
+                    canvas.add_game_object(
+                        "fishing_line".to_string(),
+                        GameObject::build("fishing_line")
+                            .image(line_image(line_len))
+                            .size(4.0, line_len)
+                            .position(rod_x, rod_y)
+                            .finish(),
+                    );
+                    last_line = line_len;
                 }
-            });
-        }
+
+                if let Some(hook) = canvas.get_game_object_mut("fishing_hook") {
+                    hook.position = (hx, hy);
+                    hook.set_image(hook_img);
+                } else {
+                    canvas.add_game_object(
+                        "fishing_hook".to_string(),
+                        GameObject::build("fishing_hook")
+                            .image(hook_img)
+                            .size(hook_w, hook_h)
+                            .position(hx, hy)
+                            .finish(),
+                    );
+                }
+            } else {
+                canvas.remove_game_object("fishing_line");
+                canvas.remove_game_object("fishing_hook");
+                last_line = -1.0;
+            }
+
+            fish_manager.update(
+                canvas, &assets,
+                hx, hy, hook_w, hook_h,
+                line_len > 0.0,
+                line_len,
+                player_center_x, player_center_y,
+                player_h,
+            );
+        });
 
         scene
     }
